@@ -1,3 +1,5 @@
+import { ADMIN_HTML } from './admin.html.js';
+
 const CREDENTIALS = {
     clientId: "",
     clientSecret: "",
@@ -58,7 +60,7 @@ const MANIFEST = {
 const HEADERS = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS,DELETE",
     "Access-Control-Max-Age": "86400",
 };
 
@@ -675,6 +677,114 @@ async function getTmdbMeta(type, id) {
     };
 }
 
+async function getTmdbDetails(type, id, apiKey) {
+    if (!apiKey) return null;
+    const url = API_ENDPOINTS.TMDB_DETAILS.replace("{type}", type)
+        .replace("{id}", id)
+        .replace("{apiKey}", apiKey);
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const data = await response.json();
+
+        return {
+            name: data.title || data.name,
+            year: (data.release_date || data.first_air_date || '').split('-')[0],
+            poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+            background: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
+            description: data.overview
+        };
+    } catch (e) {
+        console.error({ message: "Error fetching TMDB details", error: e });
+        return null;
+    }
+}
+
+async function checkMapping(fileId, parents, env) {
+    if (!env.MAPPINGS) return null;
+
+    try {
+        // Check file mapping
+        let map = await env.MAPPINGS.get(fileId, { type: 'json' });
+        if (map) return map;
+
+        // Check parent mappings (folder inheritance)
+        if (parents && Array.isArray(parents)) {
+            for (const p of parents) {
+                map = await env.MAPPINGS.get(p, { type: 'json' });
+                if (map) return map;
+            }
+        }
+    } catch (e) {
+        console.error({ message: "Error checking mappings", error: e });
+    }
+
+    return null;
+}
+
+async function handleAdminRequest(request, env) {
+    const url = new URL(request.url);
+    const authHeader = request.headers.get("Authorization");
+
+    // Basic Auth Check
+    if (!env.ADMIN_PASSWORD) {
+        return new Response("Admin password not configured", { status: 500 });
+    }
+
+    const encoded = btoa("admin:" + env.ADMIN_PASSWORD);
+    if (authHeader !== `Basic ${encoded}`) {
+        return new Response("Unauthorized", {
+            status: 401,
+            headers: { "WWW-Authenticate": 'Basic realm="Admin Access"' }
+        });
+    }
+
+    if (url.pathname === "/admin") {
+        return new Response(ADMIN_HTML, { headers: { "Content-Type": "text/html" } });
+    }
+
+    if (url.pathname === "/admin/mappings") {
+        if (!env.MAPPINGS) return createJsonResponse([], 200);
+        try {
+            const list = await env.MAPPINGS.list();
+            const mappings = [];
+            for (const key of list.keys) {
+                const val = await env.MAPPINGS.get(key.name, { type: 'json' });
+                if (val) mappings.push({ gdriveId: key.name, ...val });
+            }
+            return createJsonResponse(mappings);
+        } catch (e) {
+            return createJsonResponse({ error: e.toString() }, 500);
+        }
+    }
+
+    if (url.pathname === "/admin/mapping") {
+        if (!env.MAPPINGS) return new Response("KV not configured", { status: 500 });
+
+        if (request.method === "POST") {
+            const body = await request.json();
+            if (!body.gdriveId || !body.tmdbId || !body.type) {
+                return new Response("Missing fields", { status: 400 });
+            }
+            await env.MAPPINGS.put(body.gdriveId, JSON.stringify({
+                tmdbId: body.tmdbId,
+                type: body.type
+            }));
+            return new Response("Saved", { status: 200 });
+        }
+
+        if (request.method === "DELETE") {
+            const body = await request.json();
+            if (!body.gdriveId) return new Response("Missing gdriveId", { status: 400 });
+            await env.MAPPINGS.delete(body.gdriveId);
+            return new Response("Deleted", { status: 200 });
+        }
+    }
+
+    return new Response("Not Found", { status: 404 });
+}
+
 async function getCinemetaMeta(type, id) {
     id = id.split(":")[0];
     const response = await fetch(
@@ -824,7 +934,7 @@ async function fetchFile(fileId, accessToken) {
         );
         const searchParams = {
             supportsAllDrives: true,
-            fields: "id,name,mimeType,size,videoMediaMetadata,fileExtension,createdTime,thumbnailLink,iconLink",
+            fields: "id,name,mimeType,size,videoMediaMetadata,fileExtension,createdTime,thumbnailLink,iconLink,parents",
         };
         fetchUrl.search = new URLSearchParams(searchParams).toString();
         const response = await fetch(fetchUrl.toString(), {
@@ -943,12 +1053,16 @@ async function buildSearchQuery(streamRequest) {
     return query;
 }
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
     try {
         const url = new URL(
             decodeURIComponent(request.url).replace("%3A", ":")
         );
         globalThis.playbackUrl = url.origin + "/playback";
+
+        if (url.pathname.startsWith("/admin")) {
+            return handleAdminRequest(request, env);
+        }
 
         if (url.pathname === "/manifest.json") {
             const manifest = MANIFEST;
@@ -1076,6 +1190,27 @@ async function handleRequest(request) {
                 });
                 return null;
             }
+
+            // CHECK MAPPING OVERRIDE
+            const mapping = await checkMapping(gdriveId, file.parents, env);
+            if (mapping && CONFIG.tmdbApiKey) {
+                const tmdbMeta = await getTmdbDetails(mapping.type, mapping.tmdbId, CONFIG.tmdbApiKey);
+                if (tmdbMeta) {
+                    console.log({ message: "Applying metadata override", mapping, tmdbMeta });
+                    return createJsonResponse({
+                        meta: {
+                            id: `gdrive:${gdriveId}`,
+                            name: tmdbMeta.name,
+                            year: tmdbMeta.year,
+                            poster: tmdbMeta.poster,
+                            background: tmdbMeta.background,
+                            description: tmdbMeta.description,
+                            type: mapping.type === 'movie' ? 'movie' : 'series',
+                        }
+                    });
+                }
+            }
+
             console.log({ message: "File fetched", file });
             const parsedFile = parseFile(file);
             return createJsonResponse({
@@ -1227,7 +1362,33 @@ async function handleRequest(request) {
                 return null;
             }
 
-            const parsedFile = parseFile(file);
+            // CHECK MAPPING OVERRIDE (For streams, mainly to ensure we have context if needed, but streams are usually just files)
+            // But if we want to support parsing logic changes based on mapping (like series detection), we could do it here.
+            // For now, the user requirement "Skip filename, year, and search-based matching" seems most critical for METADATA.
+            // For STREAMS, we are directly streaming the file.
+            // However, if the file is mapped to a TV Series, we might want to ensure the stream name reflects that?
+            // Existing `createStream` uses parsed filename.
+            // If I map "S01E01.mkv" to "Breaking Bad", `createStream` will show "Breaking Bad - S01E01" if it parses correctly.
+            // If the filename is garbage "DSC_123.mkv", `createStream` will show "DSC_123.mkv".
+            // If we have a mapping, we technically know the Title.
+            // But `createStream` is about the *file* properties (resolution etc).
+            // So I will leave `createStream` mostly as is, but if I wanted to be perfect, I'd pass the mapped title to `createStream`.
+
+            const mapping = await checkMapping(fileId, file.parents, env);
+            let parsedFile = parseFile(file);
+
+            if (mapping && CONFIG.tmdbApiKey) {
+                 const tmdbMeta = await getTmdbDetails(mapping.type, mapping.tmdbId, CONFIG.tmdbApiKey);
+                 if (tmdbMeta) {
+                     // Optionally override name in parsedFile for better display in stream list
+                     // But parsedFile.name is usually the filename.
+                     // Stremio displays stream.name and stream.description.
+                     // stream.description includes parsedFile.name.
+                     // If we want to hide the ugly filename, we could override it here.
+                     // parsedFile.name = tmdbMeta.name;
+                 }
+            }
+
             return createJsonResponse({
                 streams: [createStream(parsedFile, accessToken)],
             });
@@ -1404,6 +1565,6 @@ export default {
         CREDENTIALS.refreshToken =
             CREDENTIALS.refreshToken || env.REFRESH_TOKEN;
         CONFIG.tmdbApiKey = CONFIG.tmdbApiKey || env.TMDB_API_KEY;
-        return handleRequest(request);
+        return handleRequest(request, env);
     },
 };
