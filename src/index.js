@@ -876,7 +876,7 @@ async function handleWebhook(request, env) {
     }
 }
 
-async function handleRequest(request, env) {
+export async function handleRequest(request, env) {
     try {
         const url = new URL(
             decodeURIComponent(request.url).replace("%3A", ":")
