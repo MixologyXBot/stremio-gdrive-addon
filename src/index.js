@@ -877,6 +877,12 @@ async function handleWebhook(request, env) {
 }
 
 export async function handleRequest(request, env) {
+    // Initialize config from environment variables
+    CREDENTIALS.linksChannel = CREDENTIALS.linksChannel || env.LINKS_CHANNEL;
+    CREDENTIALS.telegramBotToken =
+        CREDENTIALS.telegramBotToken || env.TELEGRAM_BOT_TOKEN;
+    CONFIG.tmdbApiKey = CONFIG.tmdbApiKey || env.TMDB_API_KEY;
+
     try {
         const url = new URL(
             decodeURIComponent(request.url).replace("%3A", ":")
@@ -1314,10 +1320,6 @@ async function getStreams(streamRequest, env) {
 
 export default {
     async fetch(request, env, ctx) {
-        CREDENTIALS.linksChannel = CREDENTIALS.linksChannel || env.LINKS_CHANNEL;
-        CREDENTIALS.telegramBotToken =
-            CREDENTIALS.telegramBotToken || env.TELEGRAM_BOT_TOKEN;
-        CONFIG.tmdbApiKey = CONFIG.tmdbApiKey || env.TMDB_API_KEY;
         return handleRequest(request, env);
     },
 };

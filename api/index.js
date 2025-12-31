@@ -1,3 +1,14 @@
+/**
+ * Vercel Edge Function Adapter
+ *
+ * This file is necessary to deploy the Cloudflare Worker code to Vercel.
+ * It serves two main purposes:
+ * 1. Adapter: Cloudflare Workers use `export default { fetch }`, while Vercel Edge
+ *    Functions use `export default function(request)`. This file wraps the core logic.
+ * 2. Polyfill: Cloudflare Workers provide a KV binding on the `env` object. Vercel
+ *    does not. This file uses `@vercel/kv` (Redis) to mimic the Cloudflare KV
+ *    interface so the core code works unchanged.
+ */
 import { handleRequest } from '../src/index.js';
 import { kv } from '@vercel/kv';
 
